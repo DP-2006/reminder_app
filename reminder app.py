@@ -1,35 +1,28 @@
 import uuid
 import logging
-from datetime import datetime
+import time
+import threading
+from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from typing import List, Optional
-import schedule
-import time
-from plyer import notification
-from logging.handlers import RotatingFileHandler
-import threading
 from abc import ABC, abstractmethod
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        RotatingFileHandler('reminder.log', maxBytes=100*1024, backupCount=3, encoding='utf-8'),
+        logging.FileHandler('reminder.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-class IDGenerator:
-    @staticmethod
-    def generate_id() -> str:
-        return str(uuid.uuid4())
-
 @dataclass
 class Reminder:
     title: str
     time: str
-    remind_id: str = field(default_factory=IDGenerator.generate_id)
+    repeat_days: int = 0
+    remind_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     created_at: datetime = field(default_factory=datetime.now)
     is_active: bool = True
     
@@ -38,156 +31,167 @@ class Reminder:
             datetime.strptime(self.time, "%H:%M")
         except ValueError:
             raise ValueError(f"Invalid time format: {self.time}. Use HH:MM")
-        logger.info(f"Reminder created: {self.title} - {self.time}")
 
-class ReminderHandler(ABC):
-    @abstractmethod
-    def process(self, reminder: Reminder):
-        pass
-
-class NotificationHandler(ReminderHandler):
-    def process(self, reminder: Reminder):
+class NotificationService:
+    @staticmethod
+    def send(title: str, message: str):
         try:
-            notification.notify(title='Task Reminder', message=reminder.title, timeout=10)
-            logger.info(f"Notification sent: {reminder.title}")
+            print(f"\nReminder: {title} - {message}")
+            logger.info(f"Notification sent: {title}")
         except Exception as e:
             logger.error(f"Notification error: {e}")
 
-class LoggingHandler(ReminderHandler):
-    def process(self, reminder: Reminder):
-        logger.info(f"Reminder executed: {reminder.title} at {reminder.time}")
-
-class ReminderScheduler:
+class Scheduler:
     def __init__(self):
-        self.reminders: List[Reminder] = []
-        self.handlers: List[ReminderHandler] = []
+        self.reminders = []
+        self.tasks = {}
         self.running = False
-        self.thread: Optional[threading.Thread] = None
+        self.thread = None
         
-    def add_handler(self, handler: ReminderHandler):
-        self.handlers.append(handler)
-    
-    def add_reminder(self, reminder: Reminder):
+    def add(self, reminder: Reminder):
         self.reminders.append(reminder)
-        schedule.every().day.at(reminder.time).do(self._execute, reminder).tag(reminder.remind_id)
-        logger.info(f"Reminder scheduled: {reminder.title}")
-    
-    def _execute(self, reminder: Reminder):
-        if reminder.is_active:
-            for handler in self.handlers:
-                try:
-                    handler.process(reminder)
-                except Exception as e:
-                    logger.error(f"Handler error: {e}")
-    
-    def remove_reminder(self, remind_id: str):
-        schedule.clear(remind_id)
+        logger.info(f"Reminder added: {reminder.title} - {reminder.time}")
+        
+    def remove(self, remind_id: str):
         self.reminders = [r for r in self.reminders if r.remind_id != remind_id]
+        if remind_id in self.tasks:
+            del self.tasks[remind_id]
+        logger.info(f"Reminder {remind_id} removed")
+        
+    def deactivate(self, remind_id: str):
+        for r in self.reminders:
+            if r.remind_id == remind_id:
+                r.is_active = False
+                logger.info(f"Reminder {remind_id} deactivated")
+                break
+                
+    def get_active(self):
+        return [r for r in self.reminders if r.is_active]
+    
+    def check_reminders(self):
+        now = datetime.now().strftime("%H:%M")
+        
+        for reminder in self.reminders:
+            if not reminder.is_active:
+                continue
+                
+            if reminder.time == now:
+                NotificationService.send(reminder.title, f"Time: {reminder.time}")
+                
+                if reminder.repeat_days > 0:
+                    next_time = datetime.now() + timedelta(days=reminder.repeat_days)
+                    reminder.time = next_time.strftime("%H:%M")
+                    logger.info(f"Repeating reminder {reminder.remind_id} set for {reminder.time}")
     
     def start(self):
         self.running = True
         self.thread = threading.Thread(target=self._run)
         self.thread.daemon = True
         self.thread.start()
-        logger.info("Scheduler started")
-    
+        print("Scheduler started")
+        
     def _run(self):
         while self.running:
-            schedule.run_pending()
-            time.sleep(1)
+            self.check_reminders()
+            time.sleep(30)
     
     def stop(self):
         self.running = False
         if self.thread:
-            self.thread.join(timeout=5)
-    
-    def get_active(self) -> List[Reminder]:
-        return [r for r in self.reminders if r.is_active]
-    
-    def deactivate(self, remind_id: str):
-        for r in self.reminders:
-            if r.remind_id == remind_id:
-                r.is_active = False
-                break
+            self.thread.join(timeout=2)
+        print("Program ended")
 
-class InteractiveManager:
-    def __init__(self, scheduler: ReminderScheduler):
-        self.scheduler = scheduler
+def main():
+    scheduler = Scheduler()
     
-    def add(self):
-        try:
-            title = input("Title: ").strip()
-            if not title:
-                print("Title cannot be empty!")
-                return
-            time_str = input("Time (HH:MM): ").strip()
-            reminder = Reminder(title=title, time=time_str)
-            self.scheduler.add_reminder(reminder)
-            print(f"✓ Reminder added. ID: {reminder.remind_id}")
-        except Exception as e:
-            print(f"✗ Error: {e}")
+    scheduler.add(Reminder("Python project deadline", "14:30"))
+    scheduler.add(Reminder("Team meeting", "16:00", repeat_days=7))
+    scheduler.add(Reminder("Water plants", "09:00", repeat_days=1))
     
-    def list(self):
-        reminders = self.scheduler.get_active()
-        if not reminders:
-            print("\nNo active reminders.")
-            return
-        print("\n=== Active Reminders ===")
-        for i, r in enumerate(reminders, 1):
-            print(f"{i}. {r.title} - {r.time} [{r.remind_id[:8]}]")
+    scheduler.start()
     
-    def run(self):
+    commands = {
+        '1': ('Add reminder', lambda: add_reminder(scheduler)),
+        '2': ('Show list', lambda: show_list(scheduler)),
+        '3': ('Remove reminder', lambda: remove_reminder(scheduler)),
+        '4': ('Deactivate reminder', lambda: deactivate_reminder(scheduler)),
+        '5': ('Exit', lambda: exit_app(scheduler))
+    }
+    
+    try:
         while True:
             print("\n" + "="*40)
             print("REMINDER MANAGER")
             print("="*40)
-            print("1. Add Reminder")
-            print("2. List Reminders")
-            print("3. Remove Reminder")
-            print("4. Deactivate Reminder")
-            print("5. Exit")
+            for key, (desc, _) in commands.items():
+                print(f"{key}. {desc}")
             
-            choice = input("Choice (1-5): ").strip()
+            choice = input("\nYour choice: ").strip()
             
-            if choice == '1':
-                self.add()
-            elif choice == '2':
-                self.list()
-            elif choice == '3':
-                rid = input("Reminder ID: ").strip()
-                self.scheduler.remove_reminder(rid)
-                print("✓ Removed")
-            elif choice == '4':
-                rid = input("Reminder ID: ").strip()
-                self.scheduler.deactivate(rid)
-                print("✓ Deactivated")
-            elif choice == '5':
-                print("Goodbye!")
-                break
+            if choice in commands:
+                if commands[choice][1]() == False:
+                    break
             else:
-                print("✗ Invalid choice!")
-
-def create_scheduler() -> ReminderScheduler:
-    s = ReminderScheduler()
-    s.add_handler(NotificationHandler())
-    s.add_handler(LoggingHandler())
-    return s
-
-if __name__ == '__main__':
-    scheduler = create_scheduler()
-    
-    for r in [
-        Reminder("Complete Python project", "14:30"),
-        Reminder("Team meeting", "16:00"),
-    ]:
-        scheduler.add_reminder(r)
-    
-    scheduler.start()
-    
-    try:
-        InteractiveManager(scheduler).run()
+                print("Invalid choice!")
+                
     except KeyboardInterrupt:
-        print("\nInterrupted")
+        print("\nProgram interrupted")
     finally:
         scheduler.stop()
-        logger.info("Program ended")
+
+def add_reminder(scheduler):
+    try:
+        title = input("Title: ").strip()
+        if not title:
+            print("Title cannot be empty!")
+            return
+            
+        time_str = input("Time (HH:MM): ").strip()
+        
+        repeat = input("Repeat (0=none, 1=daily, 7=weekly): ").strip()
+        repeat_days = int(repeat) if repeat.isdigit() else 0
+        
+        reminder = Reminder(title=title, time=time_str, repeat_days=repeat_days)
+        scheduler.add(reminder)
+        print(f"Reminder added with ID: {reminder.remind_id}")
+        
+    except Exception as e:
+        print(f"Error: {e}")
+
+def show_list(scheduler):
+    reminders = scheduler.get_active()
+    
+    if not reminders:
+        print("\nNo active reminders")
+        return
+        
+    print("\nActive Reminders:")
+    print("-" * 50)
+    for r in reminders:
+        repeat_text = ""
+        if r.repeat_days == 1:
+            repeat_text = "[Daily]"
+        elif r.repeat_days == 7:
+            repeat_text = "[Weekly]"
+        elif r.repeat_days > 0:
+            repeat_text = f"[Every {r.repeat_days} days]"
+        
+        status = "[Active]" if r.is_active else "[Inactive]"
+        print(f"ID: {r.remind_id} | {r.title} | {r.time} {repeat_text} {status}")
+
+def remove_reminder(scheduler):
+    rid = input("Reminder ID: ").strip()
+    scheduler.remove(rid)
+    print(f"Reminder {rid} removed")
+
+def deactivate_reminder(scheduler):
+    rid = input("Reminder ID: ").strip()
+    scheduler.deactivate(rid)
+    print(f"Reminder {rid} deactivated")
+
+def exit_app(scheduler):
+    scheduler.stop()
+    return False
+
+if __name__ == "__main__":
+    main()
